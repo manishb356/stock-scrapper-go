@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/gocolly/colly"
 )
@@ -27,8 +28,19 @@ func main() {
 	}
 
 	stocks := []stock{}
+	stocksChan := make(chan stock, len(tickers))
 
-	c := colly.NewCollector()
+	var wg sync.WaitGroup
+
+	c := colly.NewCollector(
+		colly.Async(true),
+	)
+
+	c.Limit(&colly.LimitRule{
+		DomainGlob:  "*",
+		Parallelism: len(tickers),
+		Delay:       1,
+	})
 
 	c.OnRequest(func(r *colly.Request) {
 		r.Headers.Set("User-Agent", "Mozilla 5.0")
@@ -37,6 +49,7 @@ func main() {
 
 	c.OnError(func(_ *colly.Response, err error) {
 		log.Println("Something went wrong ", err)
+		wg.Done()
 	})
 
 	c.OnHTML("aside.stocks-sidebar-container", func(e *colly.HTMLElement) {
@@ -46,13 +59,31 @@ func main() {
 		stock.price = e.ChildText("span.current-price")
 		stock.change = strings.Trim(e.ChildText("span.change.percentage-value"), "()")
 
-		stocks = append(stocks, stock)
+		stocksChan <- stock
+		wg.Done()
 	})
 
 	c.Wait()
 
 	for _, t := range tickers {
-		c.Visit("https://www.tickertape.in/stocks/" + t + "/")
+		wg.Add(1)
+
+		go func(ticker string) {
+			err := c.Visit("https://www.tickertape.in/stocks/" + ticker + "/")
+			if err != nil {
+				log.Printf("Error visiting %s: %v\n", ticker, err)
+				wg.Done()
+			}
+		}(t)
+	}
+
+	go func() {
+		wg.Wait()
+		close(stocksChan)
+	}()
+
+	for stock := range stocksChan {
+		stocks = append(stocks, stock)
 	}
 
 	file, err := os.Create("stocks.csv")
